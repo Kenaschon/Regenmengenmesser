@@ -20,24 +20,24 @@
 #include <ESP8266mDNS.h>
 #include <ESP8266WebServer.h>
 
-const char* WIFI_SSID     = "msg2";
-const char* WIFI_PASSWORD = "1629969423743097";
+const char* WIFI_SSID     = "xxxxx";
+const char* WIFI_PASSWORD = "xxxxxxxxxxx";
 const bool USE_STATIC_IP = true;
-IPAddress LOCAL_IP(192, 168, 49, 77);
-IPAddress GATEWAY(192, 168, 49, 1);
+IPAddress LOCAL_IP(192, 168, xx, xx);
+IPAddress GATEWAY(192, 168, x, x);
 IPAddress SUBNET(255, 255, 255, 0);
 IPAddress DNS1(8, 8, 8, 8);
 IPAddress DNS2(1, 1, 1, 1);
 
-const char* MQTT_HOST     = "192.168.49.38";
-const uint16_t MQTT_PORT  = 1886;
-const char* MQTT_USER     = "mqttuser";
-const char* MQTT_PASSWORD = "Beowolf503588";
+const char* MQTT_HOST     = "192.168.xx.xx";
+const uint16_t MQTT_PORT  = xxxx;
+const char* MQTT_USER     = "xxxxxxxx";
+const char* MQTT_PASSWORD = "xxxxxxxxx";
 
-const char* BASE_TOPIC    = "regenmesser";
-const char* DEVICE_ID     = "regenmesser";
+const char* BASE_TOPIC    = "regenmengenmesser";
+const char* DEVICE_ID     = "regenmengenmesser";
 const char* DEVICE_NAME   = "Regenmengenmesser 🌧️";
-const char* OTA_HOSTNAME  = "regenmesser";
+const char* OTA_HOSTNAME  = "regenmengenmesser";
 const char* OTA_PASSWORD  = "";
 
 const char* NTP_SERVER_1  = "pool.ntp.org";
