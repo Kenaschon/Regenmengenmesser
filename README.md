@@ -48,7 +48,7 @@ Ein smarter Regenmengenmesser auf Basis eines **Wemos D1 mini (ESP8266)** mit **
 ## 🔧 Hardware
 
 * Wemos D1 mini (ESP8266)
-* S49E Linear Hall Sensor
+* S49E Linear Hall Sensor   (bedruckte Seite vom Sensor muß zum Magneten zeigen)
 * Kippwaage (Regenmesser)
 * Optional:
 
