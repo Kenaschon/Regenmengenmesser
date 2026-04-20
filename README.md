@@ -53,6 +53,7 @@ Ein smarter Regenmengenmesser auf Basis eines **Wemos D1 mini (ESP8266)** mit **
 * Optional:
 
   * BME280 oder BMP280 (I2C)
+  * RGB LED (z.B. WS2812B)
 
 ---
 
@@ -63,6 +64,7 @@ Ein smarter Regenmengenmesser auf Basis eines **Wemos D1 mini (ESP8266)** mit **
 | Hall Sensor | A0                |
 | BME/BMP SDA | D2 (GPIO4)        |
 | BME/BMP SCL | D1 (GPIO5)        |
+| RGB Led     | D5 (GPIO14)       |
 
 ---
 
