@@ -1,6 +1,6 @@
 
 /*
-  Regenmengenmesser 🌧️ V4.9 für Wemos D1 mini / ioBroker (mqtt.0)
+  Regenmengenmesser 🌧️ V4.0 für Wemos D1 mini / ioBroker (mqtt.0)
   - S49E Linear-Hall-Sensor an A0
   - Auto-Erkennung BME280 / BMP280 über Chip-ID
   - BMP280: Temperatur + Druck, keine Luftfeuchte
@@ -19,6 +19,7 @@
 #include <ArduinoOTA.h>
 #include <ESP8266mDNS.h>
 #include <ESP8266WebServer.h>
+#include <Adafruit_NeoPixel.h>
 
 const char* WIFI_SSID     = "xxxxx";
 const char* WIFI_PASSWORD = "xxxxxxxxxxx";
@@ -37,7 +38,7 @@ const char* MQTT_PASSWORD = "xxxxxxxxx";
 const char* BASE_TOPIC    = "regenmengenmesser";
 const char* DEVICE_ID     = "regenmengenmesser";
 const char* DEVICE_NAME   = "Regenmengenmesser 🌧️";
-const char* OTA_HOSTNAME  = "regenmengenmesser";
+const char* OTA_HOSTNAME  = "Regenmengenmesser";
 const char* OTA_PASSWORD  = "";
 
 const char* NTP_SERVER_1  = "pool.ntp.org";
@@ -50,6 +51,7 @@ const uint32_t FAILSAFE_RESTART_AFTER_MS = 30UL * 60UL * 1000UL;
 static const uint8_t PIN_HALL = A0;
 static const uint8_t PIN_SDA  = 4;
 static const uint8_t PIN_SCL  = 5;
+static const uint8_t PIN_LED  = D5;
 
 static const float MM_PER_TIP = 0.64f;
 
@@ -60,8 +62,8 @@ bool isBMP280 = false;
 bool isBME280 = false;
 
 int hallCenter = 512;
-int triggerDelta = 70;
-int resetDelta = 30;
+int triggerDelta = 120;
+int resetDelta = 60;
 const uint32_t hallLockoutMs = 250UL;
 const uint8_t hallSamples = 8;
 const uint32_t hallSampleIntervalMs = 5UL;
@@ -71,6 +73,15 @@ static const uint32_t HEARTBEAT_MS      = 30000UL;
 static const uint32_t WIFI_RETRY_MS     = 10000UL;
 static const uint32_t MQTT_RETRY_MS     = 5000UL;
 static const uint32_t HALL_TELEMETRY_MS = 10000UL;
+static const uint32_t NO_RAIN_TIMEOUT_MS = 15UL * 60UL * 1000UL;
+static const uint32_t LED_TIP_BLINK_MS   = 120UL;
+static const uint32_t LED_STATUS_BLINK_MS = 250UL;
+static const int LED_MAGNET_THRESHOLD = 170;   // Mitte zwischen ca. 42 (weg) und 299 (dran)
+static const bool LED_MAGNET_INVERT = false; // auf true setzen, falls rot/grün vertauscht sind
+static const uint8_t LED_DAY_BRIGHTNESS   = 150;
+static const uint8_t LED_NIGHT_BRIGHTNESS = 100;
+static const uint8_t NIGHT_START_HOUR     = 22;
+static const uint8_t NIGHT_END_HOUR       = 6;
 
 enum HallState { HALL_UNKNOWN = 0, HALL_AWAY = 1, HALL_NEAR = 2 };
 
@@ -79,16 +90,19 @@ PubSubClient mqtt(espClient);
 Adafruit_BME280 bme;
 Adafruit_BMP280 bmp;
 ESP8266WebServer webServer(80);
+Adafruit_NeoPixel led(1, PIN_LED, NEO_GRB + NEO_KHZ800);
 
 uint32_t g_tipsTotal = 0, g_tips1m = 0, g_tips10m = 0, g_tips60m = 0, g_tipsToday = 0;
 uint32_t last1mWindowMs = 0, last10mWindowMs = 0, last60mWindowMs = 0;
 uint32_t lastSensorPublishMs = 0, lastHeartbeatMs = 0, lastWifiRetryMs = 0, lastMqttRetryMs = 0;
-uint32_t lastHallReadMs = 0, lastHallTelemetryMs = 0, bootMillis = 0, lastHealthyMs = 0, lastTipMs = 0;
+uint32_t lastHallReadMs = 0, lastHallTelemetryMs = 0, bootMillis = 0, lastHealthyMs = 0, lastTipMs = 0, lastTipBlinkMs = 0;
 
 float lastTempC = NAN, lastHumidityPct = NAN, lastPressureHpa = NAN;
 bool timeSynced = false;
 int lastHallRaw = 0, lastHallDelta = 0, lastHallMin = 1023, lastHallMax = 0, lastDayOfYear = -1;
 HallState hallState = HALL_UNKNOWN;
+uint32_t lastLedColor = 0;
+uint8_t lastLedBrightness = 255;
 
 String topic(const char* leaf){ return String(BASE_TOPIC)+"/"+leaf; }
 void publishString(const char* leaf, const String& v, bool r=true){ mqtt.publish(topic(leaf).c_str(), v.c_str(), r); }
@@ -112,6 +126,89 @@ String statusBadge(bool ok, const String& a, const String& b){ return ok ? "<spa
 String hallStateText(){ if(hallState==HALL_NEAR) return "nah"; if(hallState==HALL_AWAY) return "weg"; return "unbekannt"; }
 String sensorTypeText(){ if(isBME280) return "BME280"; if(isBMP280) return "BMP280"; return "unbekannt"; }
 String sensorAddressText(){ if(detectedSensorAddress==0) return "nicht gefunden"; char buf[8]; snprintf(buf,sizeof(buf),"0x%02X", detectedSensorAddress); return String(buf); }
+
+bool isNightTime(){
+  updateTimeState();
+  if(!timeSynced) return false;
+  time_t now = time(nullptr);
+  struct tm tmNow;
+  localtime_r(&now, &tmNow);
+  return (tmNow.tm_hour >= NIGHT_START_HOUR || tmNow.tm_hour < NIGHT_END_HOUR);
+}
+
+void applyLedBrightness(){
+  uint8_t targetBrightness = isNightTime() ? LED_NIGHT_BRIGHTNESS : LED_DAY_BRIGHTNESS;
+  if(targetBrightness == lastLedBrightness) return;
+  lastLedBrightness = targetBrightness;
+  led.setBrightness(targetBrightness);
+  led.setPixelColor(0, lastLedColor);
+  led.show();
+}
+
+void setLED(uint8_t r, uint8_t g, uint8_t b){
+  uint32_t color = led.Color(r,g,b);
+  if(color == lastLedColor) return;
+  lastLedColor = color;
+  led.setPixelColor(0, color);
+  led.show();
+}
+
+bool isMagnetPresentForLed(){
+  bool present = lastHallDelta >= LED_MAGNET_THRESHOLD;
+  return LED_MAGNET_INVERT ? !present : present;
+}
+
+void setRainIntensityColor(float mmPerHour){
+  if(isMagnetPresentForLed()) {
+    setLED(255, 0, 0);                                // Magnet dran immer rot
+    return;
+  }
+
+  if(mmPerHour < 0.10f) {
+    setLED(0, 255, 0);                                // Magnet weg / trocken
+    return;
+  }
+
+  if(mmPerHour < 2.0f)       setLED(80, 255, 0);     // leichter Regen
+  else if(mmPerHour < 6.0f)  setLED(180, 255, 0);    // mäßiger Regen
+  else if(mmPerHour < 12.0f) setLED(255, 140, 0);    // stärkerer Regen
+  else                       setLED(255, 0, 0);      // sehr starker Regen
+}
+
+void updateStatusLed(){
+  applyLedBrightness();
+
+  uint32_t now = millis();
+  bool wifiOk = (WiFi.status() == WL_CONNECTED);
+  bool mqttOk = mqtt.connected();
+
+  if(!wifiOk){
+    bool phase = ((now / LED_STATUS_BLINK_MS) % 2) == 0;
+    setLED(phase ? 255 : 0, 0, phase ? 255 : 0); // Magenta blinkt bei WLAN-Fehler
+    return;
+  }
+
+  if(!mqttOk){
+    bool phase = ((now / LED_STATUS_BLINK_MS) % 2) == 0;
+    setLED(phase ? 255 : 0, phase ? 140 : 0, 0); // Orange blinkt bei MQTT-Fehler
+    return;
+  }
+
+  if((lastTipBlinkMs > 0) && ((uint32_t)(now - lastTipBlinkMs) < LED_TIP_BLINK_MS)){
+    setLED(255, 255, 255); // kurzer weißer Blitz bei jedem Tip
+    return;
+  }
+
+  uint32_t noRainReferenceMs = (lastTipMs > 0) ? lastTipMs : bootMillis;
+  bool noRain = ((uint32_t)(now - noRainReferenceMs) >= NO_RAIN_TIMEOUT_MS);
+  if(noRain){
+    setLED(0, 0, 255); // 15 min kein Regen (auch nach Boot ohne bisherigen Tip)
+    return;
+  }
+
+  float mmPerHour = g_tips60m * MM_PER_TIP;
+  setRainIntensityColor(mmPerHour);
+}
 
 void scanI2C() {
   Serial.println("I2C Scan gestartet...");
@@ -162,7 +259,7 @@ int readHallFiltered(){
   lastHallMin=localMin; lastHallMax=localMax; return (int)(sum/hallSamples);
 }
 
-void registerTip(){ g_tipsTotal++; g_tips1m++; g_tips10m++; g_tips60m++; g_tipsToday++; lastTipMs=millis(); }
+void registerTip(){ g_tipsTotal++; g_tips1m++; g_tips10m++; g_tips60m++; g_tipsToday++; lastTipMs=millis(); lastTipBlinkMs=lastTipMs; }
 
 HallState classifyHallState(int delta){
   if(abs(delta) >= triggerDelta) return HALL_NEAR;
@@ -202,25 +299,34 @@ void setupWebInfo(){
     html += "<div class='hero'><div><div class='title'>🌧️ Regenmengenmesser 🌧️</div><div class='sub'>Wemos D1 mini · S49E an A0 · BME280/BMP280 Chip-ID Auto-Erkennung · Auto-Refresh alle 15 s</div></div><div>";
     html += statusBadge(WiFi.status()==WL_CONNECTED,"WLAN online","WLAN offline") + " " + statusBadge(mqtt.connected(),"MQTT online","MQTT offline") + " " + statusBadge(sensorOk,sensorTypeText()+" ok","BME/BMP fehlt") + "</div></div>";
 
-    html += "<div class='toprow'>";
-    html += "<div class='card topcard'><div class='label'>Regen heute</div><div class='value'>" + String(g_tipsToday*MM_PER_TIP,2) + " <span class='small'>mm</span></div><div class='small'>" + String(g_tipsToday) + " Tips</div></div>";
-    html += "<div class='card topcard'><div class='label'>Regen gesamt</div><div class='value'>" + String(g_tipsTotal*MM_PER_TIP,2) + " <span class='small'>mm</span></div><div class='small'>" + String(g_tipsTotal) + " Tips</div></div>";
-    html += "<div class='card topcard'><div class='label'>Temperatur</div><div class='value'>" + fmtFloat(lastTempC,1) + " <span class='small'>°C</span></div><div class='small'>" + sensorTypeText() + " " + sensorAddressText() + "</div></div>";
-    html += "<div class='card topcard'><div class='label'>Luftdruck</div><div class='value'>" + fmtFloat(lastPressureHpa,1) + " <span class='small'>hPa</span></div><div class='small'>auf Sensorhöhe</div></div>";
-    if (!isBMP280) {
-      html += "<div class='card topcard'><div class='label'>Luftfeuchte</div><div class='value'>" + fmtFloat(lastHumidityPct,1) + " <span class='small'>%</span></div><div class='small'>relative Feuchte</div></div>";
-    }
-    html += "</div>";
+html += "<div class='toprow'>";
+float rainTodayValue = g_tipsToday * MM_PER_TIP;
+String rainClass = "ok";
+if (rainTodayValue >= 20.0f) rainClass = "bad";
+else if (rainTodayValue >= 5.0f) rainClass = "warn";
+
+html += "<div class='card topcard " + rainClass + "'><div class='label'>Regen heute</div><div class='value'>" + String(rainTodayValue,2) + " <span class='small'>mm / L/m²</span></div><div class='small'>1 mm Regen = 1 Liter pro m² • " + String(g_tipsToday) + " Tips</div></div>";
+html += "<div class='card topcard'><div class='label'>Regenrate</div><div class='value'>" + String(g_tips60m*MM_PER_TIP,2) + " <span class='small'>mm/h</span></div><div class='small'>basierend auf den letzten 60 Minuten</div></div>";
+html += "<div class='card topcard'><div class='label'>Regen gesamt</div><div class='value'>" + String(g_tipsTotal*MM_PER_TIP,2) + " <span class='small'>mm</span></div><div class='small'>" + String(g_tipsTotal) + " Tips</div></div>";
+html += "</div>";
+
+html += "<div class='toprow'>";
+html += "<div class='card topcard'><div class='label'>Temperatur</div><div class='value'>" + fmtFloat(lastTempC,1) + " <span class='small'>°C</span></div><div class='small'>" + sensorTypeText() + " " + sensorAddressText() + "</div></div>";
+html += "<div class='card topcard'><div class='label'>Luftdruck</div><div class='value'>" + fmtFloat(lastPressureHpa,1) + " <span class='small'>hPa</span></div><div class='small'>auf Sensorhöhe</div></div>";
+if (!isBMP280) {
+  html += "<div class='card topcard'><div class='label'>Luftfeuchte</div><div class='value'>" + fmtFloat(lastHumidityPct,1) + " <span class='small'>%</span></div><div class='small'>relative Feuchte</div></div>";
+}
+html += "</div>";
 
     html += "<div class='grid'>";
     html += "<div class='card'><div class='label'>Hall-Sensor S49E</div><table class='meta'>";
-    html += "<tr><td class='muted'>Rohwert</td><td>" + String(lastHallRaw) + "</td></tr><tr><td class='muted'>Delta</td><td>" + String(lastHallDelta) + "</td></tr><tr><td class='muted'>Center</td><td>" + String(hallCenter) + "</td></tr><tr><td class='muted'>Trigger / Reset</td><td>" + String(triggerDelta) + " / " + String(resetDelta) + "</td></tr><tr><td class='muted'>Min / Max zuletzt</td><td>" + String(lastHallMin) + " / " + String(lastHallMax) + "</td></tr><tr><td class='muted'>Status</td><td>" + hallStateText() + "</td></tr></table></div>";
+    html += "<tr><td class='muted'>Rohwert</td><td>" + String(lastHallRaw) + "</td></tr><tr><td class='muted'>Delta</td><td>" + String(lastHallDelta) + "</td></tr><tr><td class='muted'>Center</td><td>" + String(hallCenter) + "</td></tr><tr><td class='muted'>Trigger / Reset</td><td>" + String(triggerDelta) + " / " + String(resetDelta) + "</td></tr><tr><td class='muted'>LED Magnet-Schwelle</td><td>" + String(LED_MAGNET_THRESHOLD) + "</td></tr><tr><td class='muted'>Min / Max zuletzt</td><td>" + String(lastHallMin) + " / " + String(lastHallMax) + "</td></tr><tr><td class='muted'>Status</td><td>" + hallStateText() + "</td></tr><tr><td class='muted'>LED Magnet</td><td>" + String(isMagnetPresentForLed() ? "dran" : "weg") + "</td></tr></table></div>";
 
     html += "<div class='card'><div class='label'>Sensor / I2C</div><table class='meta'><tr><td class='muted'>Sensor erkannt</td><td>" + String(sensorOk ? "ja" : "nein") + "</td></tr><tr><td class='muted'>Typ</td><td>" + sensorTypeText() + "</td></tr><tr><td class='muted'>Adresse</td><td>" + sensorAddressText() + "</td></tr><tr><td class='muted'>I2C SDA / SCL</td><td>D2 / D1</td></tr><tr><td class='muted'>Erkennung</td><td>Chip-ID 0xD0</td></tr><tr><td class='muted'>Boot-Scan</td><td>" + String(ENABLE_I2C_SCAN_AT_BOOT ? "an" : "aus") + "</td></tr></table></div>";
 
     html += "<div class='card'><div class='label'>System</div><table class='meta'>";
     html += "<tr><td class='muted'>Gerät</td><td>" + String(DEVICE_NAME) + "</td></tr>";
-    html += "<tr><td class='muted'>Firmware</td><td>regenmesser_v4_10_layout_fix</td></tr>";
+    html += "<tr><td class='muted'>Firmware</td><td>Regenmengenmesser_v4</td></tr>";
     html += "<tr><td class='muted'>Uptime</td><td>" + formatUptime() + "</td></tr>";
     html += "<tr><td class='muted'>Zeit</td><td>" + isoTimestamp() + "</td></tr>";
     html += "<tr><td class='muted'>OTA Hostname</td><td>" + String(OTA_HOSTNAME) + "</td></tr>";
@@ -231,7 +337,7 @@ void setupWebInfo(){
     html += "<tr><td class='muted'>MAC</td><td>" + WiFi.macAddress() + "</td></tr>";
     html += "<tr><td class='muted'>Topic</td><td>" + String(BASE_TOPIC) + "/#</td></tr></table></div>";
 
-    html += "</div><div class='footer'>Lokale Statusseite des Sensors. MQTT-Ziel in ioBroker: <b>mqtt.0.regenmesser.*</b></div></div></body></html>";
+    html += "</div><div class='footer'>Lokale Statusseite des Sensors. MQTT-Ziel in ioBroker: <b>mqtt.0.regenmengenmesser.*</b></div></div></body></html>";
     webServer.send(200, "text/html; charset=utf-8", html);
   });
   webServer.begin();
@@ -244,7 +350,7 @@ bool connectMqtt(){
   if(ok){
     publishString("status","online",true); publishString("device/id",DEVICE_ID,true); publishString("device/name",DEVICE_NAME,true);
     publishString("device/ip",WiFi.localIP().toString(),true); publishString("device/mac",WiFi.macAddress(),true);
-    publishString("device/fw","regenmesser_v4_10_layout_fix",true); publishBool("device/sensor_ok",sensorOk,true);
+    publishString("device/fw","Regenmengenmesser_v4",true); publishBool("device/sensor_ok",sensorOk,true);
     publishBool("device/time_synced",timeSynced,true); publishString("device/last_boot",isoTimestamp(),true); publishString("device/ota_host",OTA_HOSTNAME,true);
     publishString("device/sensor_type", sensorTypeText(), true);
     publishString("device/sensor_address", sensorAddressText(), true);
@@ -300,15 +406,20 @@ void setup(){
   Wire.begin(PIN_SDA,PIN_SCL);
   if (ENABLE_I2C_SCAN_AT_BOOT) scanI2C();
   sensorOk = initEnvSensor();
+  led.begin();
+  led.setBrightness(50);
+  led.clear();
+  led.show();
   connectWifi(); setupTime(); setupOTA(); setupWebInfo();
   lastHallRaw = readHallFiltered();
-  hallCenter = lastHallRaw;
-  hallState = classifyHallState(lastHallRaw - hallCenter);
+  lastHallDelta = lastHallRaw - hallCenter;
+  hallState = classifyHallState(lastHallDelta);
+  updateStatusLed();
   uint32_t now=millis(); last1mWindowMs=now; last10mWindowMs=now; last60mWindowMs=now; lastSensorPublishMs=now; lastHeartbeatMs=now; lastHallTelemetryMs=now;
 }
 
 void loop(){
-  yield(); ArduinoOTA.handle(); webServer.handleClient(); handleHallRainGauge();
+  yield(); ArduinoOTA.handle(); webServer.handleClient(); handleHallRainGauge(); updateStatusLed();
   uint32_t now=millis();
   if(WiFi.status()!=WL_CONNECTED){ if((uint32_t)(now-lastWifiRetryMs)>=WIFI_RETRY_MS){ lastWifiRetryMs=now; connectWifi(); } handleFailsafeRestart(); delay(5); return; }
   updateTimeState(); handleMidnightReset();
