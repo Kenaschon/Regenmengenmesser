@@ -68,7 +68,7 @@ const uint32_t hallLockoutMs = 250UL;
 const uint8_t hallSamples = 8;
 const uint32_t hallSampleIntervalMs = 5UL;
 
-static const uint32_t SENSOR_PUBLISH_MS = 60000UL;
+static const uint32_t SENSOR_PUBLISH_MS = 5UL * 60UL * 1000UL;  // vollständige MQTT-Daten spätestens alle 5 Minuten senden
 static const uint32_t HEARTBEAT_MS      = 30000UL;
 static const uint32_t WIFI_RETRY_MS     = 10000UL;
 static const uint32_t MQTT_RETRY_MS     = 5000UL;
